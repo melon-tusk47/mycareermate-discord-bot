@@ -9,6 +9,8 @@
     "node": ">=18.x"
   },
   "scripts": {
+    "prisma:generate": "npx prisma generate",
+    "prestart": "npm run prisma:generate",
     "start": "node app.js",
     "register": "node commands.js",
     "dev": "nodemon app.js"
