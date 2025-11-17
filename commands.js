@@ -11,6 +11,12 @@ const RESUME_REVIEW_COMMAND = {
       description: "Upload your resume (PDF only, max 2MB)",
       required: true,
     },
+    {
+      type: 3,
+      name: "email",
+      description: "Your email address",
+      required: true,
+    },
   ],
   type: 1,
   integration_types: [0, 1],

@@ -1,22 +1,72 @@
 import "dotenv/config";
 import express from "express";
 import {
-  InteractionResponseFlags,
-  InteractionResponseType,
   InteractionType,
+  InteractionResponseType,
+  InteractionResponseFlags,
   MessageComponentTypes,
   verifyKeyMiddleware,
 } from "discord-interactions";
-import { getRandomEmoji, DiscordRequest } from "./utils.js";
+import { PrismaClient } from "@prisma/client";
+import { Resend } from "resend";
 
 // Create an express app
 const app = express();
 // Get port, or default to 3000
 const PORT = process.env.PORT || 3000;
-// To keep track of our active games
-const activeGames = {};
-// To store resume data temporarily until email is provided
-const pendingResumes = {};
+
+// Prisma client
+const prisma = new PrismaClient();
+// Resend client
+const resend = new Resend(process.env.RESEND_API_KEY);
+
+// Allowed channel for resume review command
+const RESUME_REVIEW_CHANNEL_ID = process.env.RESUME_REVIEW_CHANNEL_ID;
+// How many reviews a user can request
+const MAX_RESUME_REVIEWS_PER_USER = 1;
+
+function sendEphemeralText(res, content) {
+  return res.send({
+    type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+    data: {
+      flags:
+        InteractionResponseFlags.EPHEMERAL |
+        InteractionResponseFlags.IS_COMPONENTS_V2,
+      components: [
+        {
+          type: MessageComponentTypes.TEXT_DISPLAY,
+          content,
+        },
+      ],
+    },
+  });
+}
+
+async function sendHelloWorldEmail(toEmail) {
+  if (!process.env.RESEND_API_KEY) {
+    console.error("RESEND_API_KEY is not set.");
+    return false;
+  }
+
+  try {
+    const { data, error } = await resend.emails.send({
+      from: "MyCareerMate <info@mycareermate.io>",
+      to: [toEmail],
+      subject: "hello world from MyCareerMate",
+      text: "hello world",
+    });
+
+    if (error) {
+      console.error("Error sending email with Resend:", error);
+      return false;
+    }
+
+    return true;
+  } catch (err) {
+    console.error("Exception while sending email with Resend:", err);
+    return false;
+  }
+}
 
 /**
  * Interactions endpoint URL where Discord will send HTTP requests
@@ -26,8 +76,8 @@ app.post(
   "/interactions",
   verifyKeyMiddleware(process.env.PUBLIC_KEY),
   async function (req, res) {
-    // Interaction id, type and data
-    const { id, type, data } = req.body;
+    // Interaction type and data
+    const { type, id, data, channel_id } = req.body;
 
     /**
      * Handle verification requests
@@ -41,30 +91,45 @@ app.post(
      * See https://discord.com/developers/docs/interactions/application-commands#slash-commands
      */
     if (type === InteractionType.APPLICATION_COMMAND) {
-      const { name } = data;
+      const { name, options } = data;
 
       if (name === "resume-review") {
-        const attachmentOption = data.options.find(
+        // Restrict to a specific channel if configured
+        if (
+          RESUME_REVIEW_CHANNEL_ID &&
+          channel_id !== RESUME_REVIEW_CHANNEL_ID
+        ) {
+          return sendEphemeralText(
+            res,
+            "❌ Please use this command in the MyCareerMate Platform #resume-review channel:\nhttps://discord.com/channels/1439456602334691361/1439494111596908575"
+          );
+        }
+
+        // Get user info from interaction
+        const context = req.body.context;
+        const userObj = context === 0 ? req.body.member?.user : req.body.user;
+        const discordId = userObj?.id;
+        const username =
+          userObj?.global_name || userObj?.username || "Unknown User";
+
+        if (!discordId) {
+          return sendEphemeralText(
+            res,
+            "❌ Unable to identify your Discord user. Please try again."
+          );
+        }
+
+        const attachmentOption = options?.find(
           (opt) => opt.name === "resume"
         );
         const attachmentId = attachmentOption?.value;
         const attachment = data.resolved?.attachments?.[attachmentId];
 
         if (!attachment) {
-          return res.send({
-            type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-            data: {
-              flags:
-                InteractionResponseFlags.EPHEMERAL |
-                InteractionResponseFlags.IS_COMPONENTS_V2,
-              components: [
-                {
-                  type: MessageComponentTypes.TEXT_DISPLAY,
-                  content: "❌ No attachment found. Please upload a PDF file.",
-                },
-              ],
-            },
-          });
+          return sendEphemeralText(
+            res,
+            "❌ No attachment found. Please upload a PDF file."
+          );
         }
 
         const isPDF =
@@ -72,155 +137,108 @@ app.post(
           attachment.filename.toLowerCase().endsWith(".pdf");
 
         if (!isPDF) {
-          return res.send({
-            type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-            data: {
-              flags:
-                InteractionResponseFlags.EPHEMERAL |
-                InteractionResponseFlags.IS_COMPONENTS_V2,
-              components: [
-                {
-                  type: MessageComponentTypes.TEXT_DISPLAY,
-                  content: `❌ Invalid file type. Please upload a PDF file.\n\nReceived: ${attachment.filename} (${attachment.content_type})`,
-                },
-              ],
-            },
-          });
+          return sendEphemeralText(
+            res,
+            `❌ Invalid file type. Please upload a PDF file.\n\nReceived: ${attachment.filename} (${attachment.content_type})`
+          );
         }
 
         const maxSize = 2 * 1024 * 1024;
         if (attachment.size > maxSize) {
           const sizeMB = (attachment.size / (1024 * 1024)).toFixed(2);
-          return res.send({
-            type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-            data: {
-              flags:
-                InteractionResponseFlags.EPHEMERAL |
-                InteractionResponseFlags.IS_COMPONENTS_V2,
-              components: [
-                {
-                  type: MessageComponentTypes.TEXT_DISPLAY,
-                  content: `❌ File too large. Maximum size is 2MB.\n\nYour file: ${attachment.filename} (${sizeMB}MB)`,
-                },
-              ],
-            },
-          });
+          return sendEphemeralText(
+            res,
+            `❌ File too large. Maximum size is 2MB.\n\nYour file: ${attachment.filename} (${sizeMB}MB)`
+          );
         }
 
-        // Store the attachment data temporarily
-        pendingResumes[id] = {
-          filename: attachment.filename,
-          size: attachment.size,
-          url: attachment.url,
-        };
-
-        // Show modal to collect email
-        return res.send({
-          type: InteractionResponseType.MODAL,
-          data: {
-            custom_id: `email_modal_${id}`,
-            title: "Resume Review - Email",
-            components: [
-              {
-                type: 1, // ACTION_ROW
-                components: [
-                  {
-                    type: 4, // TEXT_INPUT
-                    custom_id: "email_input",
-                    label: "Your Email Address",
-                    style: 1, // SHORT
-                    placeholder: "example@email.com",
-                    required: true,
-                    max_length: 100,
-                  },
-                ],
-              },
-            ],
-          },
-        });
-      }
-
-      console.error(`unknown command: ${name}`);
-      return res.status(400).json({ error: "unknown command" });
-    }
-
-    /**
-     * Handle modal submissions
-     */
-    if (type === InteractionType.MODAL_SUBMIT) {
-      const { custom_id } = data;
-
-      if (custom_id.startsWith("email_modal_")) {
-        const resumeId = custom_id.replace("email_modal_", "");
-        const resumeData = pendingResumes[resumeId];
-
-        if (!resumeData) {
-          return res.send({
-            type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-            data: {
-              flags:
-                InteractionResponseFlags.EPHEMERAL |
-                InteractionResponseFlags.IS_COMPONENTS_V2,
-              components: [
-                {
-                  type: MessageComponentTypes.TEXT_DISPLAY,
-                  content:
-                    "❌ Session expired. Please upload your resume again.",
-                },
-              ],
-            },
-          });
-        }
-
-        // Get email from modal submission
-        const emailInput = data.components[0].components.find(
-          (c) => c.custom_id === "email_input"
-        );
-        const email = emailInput?.value?.trim();
+        const emailOption = options?.find((opt) => opt.name === "email");
+        const email = emailOption?.value?.trim();
 
         // Validate email format
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
         if (!email || !emailRegex.test(email)) {
-          // Clean up
-          delete pendingResumes[resumeId];
-
-          return res.send({
-            type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-            data: {
-              flags:
-                InteractionResponseFlags.EPHEMERAL |
-                InteractionResponseFlags.IS_COMPONENTS_V2,
-              components: [
-                {
-                  type: MessageComponentTypes.TEXT_DISPLAY,
-                  content: `❌ Invalid email address: "${email}"\n\nPlease use the command again with a valid email.`,
-                },
-              ],
-            },
-          });
+          return sendEphemeralText(
+            res,
+            `❌ Invalid email address: "${email}"\n\nPlease use the command again with a valid email.`
+          );
         }
 
-        // Process the resume (for now, just read the filename)
-        const filename = resumeData.filename;
+        // Check per-user review limit
+        let user;
+        try {
+          user = await prisma.user.findUnique({
+            where: { discordId },
+          });
 
-        // Clean up stored data
-        delete pendingResumes[resumeId];
+          if (
+            user &&
+            user.resumeReviewCount >= MAX_RESUME_REVIEWS_PER_USER
+          ) {
+            return sendEphemeralText(
+              res,
+              "❌ You have already requested a resume review. For now, it's limited to one review per user."
+            );
+          }
+        } catch (error) {
+          console.error("Error checking resume review user data:", error);
+          return sendEphemeralText(
+            res,
+            "❌ Something went wrong while checking your resume review status. Please try again later."
+          );
+        }
 
-        return res.send({
-          type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-          data: {
-            flags:
-              InteractionResponseFlags.EPHEMERAL |
-              InteractionResponseFlags.IS_COMPONENTS_V2,
-            components: [
-              {
-                type: MessageComponentTypes.TEXT_DISPLAY,
-                content: `✅ Resume review complete!\n\n📄 **File:** ${filename}\n📧 **Sent to:** ${email}\n\n🎉 Your resume analysis has been sent to your email address.`,
+        // Send hello world email
+        const emailSent = await sendHelloWorldEmail(email);
+        if (!emailSent) {
+          return sendEphemeralText(
+            res,
+            "❌ We couldn't send an email to your address. Please try again later."
+          );
+        }
+
+        // Store or update user data
+        try {
+          if (!user) {
+            await prisma.user.create({
+              data: {
+                discordId,
+                email,
+                username,
+                resumeReviewCount: 1,
+                lastResumeReviewAt: new Date(),
               },
-            ],
-          },
-        });
+            });
+          } else {
+            await prisma.user.update({
+              where: { id: user.id },
+              data: {
+                email,
+                username,
+                resumeReviewCount: { increment: 1 },
+                lastResumeReviewAt: new Date(),
+              },
+            });
+          }
+        } catch (error) {
+          console.error("Error saving resume review user data:", error);
+          return sendEphemeralText(
+            res,
+            "⚠️ Your email was sent, but we couldn't record your resume review status. You may be able to retry later."
+          );
+        }
+
+        // Process the resume (for now, just respond with info)
+        const filename = attachment.filename;
+
+        return sendEphemeralText(
+          res,
+          `✅ Resume review request received!\n\n📄 **File:** ${filename}\n📧 **Email:** ${email}\n\n🎉 We've just sent a "hello world" test email to your inbox via MyCareerMate.`
+        );
       }
+
+      console.error(`unknown command: ${name}`);
+      return res.status(400).json({ error: "unknown command" });
     }
 
     console.error("unknown interaction type", type);
