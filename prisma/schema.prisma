@@ -8,13 +8,38 @@ datasource db {
 }
 
 model User {
-  id                 String   @id @default(cuid())
-  discordId          String   @unique
-  email              String   @unique
-  username           String?
-  resumeReviewCount  Int      @default(0)
-  lastResumeReviewAt DateTime?
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
+  id                    String                 @id @default(cuid())
+  discordId             String                 @unique
+  email                 String                 @unique
+  username              String?
+  resumeReviewCount     Int                    @default(0)
+  lastResumeReviewAt    DateTime?
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
+  resumeReviewRequests  ResumeReviewRequest[]
 }
 
+enum ResumeReviewStatus {
+  QUEUED
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+model ResumeReviewRequest {
+  id                     String              @id @default(cuid())
+  userId                 String?
+  user                   User?               @relation(fields: [userId], references: [id])
+  email                  String
+  discordId              String?
+  discordUsername        String?
+  attachmentUrl          String
+  attachmentFilename     String?
+  attachmentContentType  String?
+  attachmentSizeBytes    Int?
+  status                 ResumeReviewStatus  @default(QUEUED)
+  errorMessage           String?
+  createdAt              DateTime            @default(now())
+  updatedAt              DateTime            @updatedAt
+  processedAt            DateTime?
+}

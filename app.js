@@ -8,7 +8,7 @@ import {
   verifyKeyMiddleware,
 } from "discord-interactions";
 import { PrismaClient } from "@prisma/client";
-import { Resend } from "resend";
+import { DiscordRequest } from "./utils.js";
 
 // Create an express app
 const app = express();
@@ -17,13 +17,15 @@ const PORT = process.env.PORT || 3000;
 
 // Prisma client
 const prisma = new PrismaClient();
-// Resend client
-const resend = new Resend(process.env.RESEND_API_KEY);
 
 // Allowed channel for resume review command
 const RESUME_REVIEW_CHANNEL_ID = process.env.RESUME_REVIEW_CHANNEL_ID;
 // How many reviews a user can request
 const MAX_RESUME_REVIEWS_PER_USER = 1;
+// Channel to notify when a new resume review request is queued
+const RESUME_REVIEW_ALERT_CHANNEL_ID =
+  process.env.RESUME_REVIEW_ALERT_CHANNEL_ID ||
+  "1439472549250465815";
 
 function sendEphemeralText(res, content) {
   return res.send({
@@ -42,29 +44,47 @@ function sendEphemeralText(res, content) {
   });
 }
 
-async function sendHelloWorldEmail(toEmail) {
-  if (!process.env.RESEND_API_KEY) {
-    console.error("RESEND_API_KEY is not set.");
-    return false;
+async function notifyNewResumeReviewQueued({
+  discordId,
+  email,
+  filename,
+}) {
+  if (!RESUME_REVIEW_ALERT_CHANNEL_ID) {
+    return;
   }
 
+  const contentLines = [];
+  contentLines.push("📥 New resume review request queued.");
+  contentLines.push("");
+  if (discordId) {
+    contentLines.push(`From: <@${discordId}>`);
+  }
+  if (email) {
+    contentLines.push(`Email: ${email}`);
+  }
+  if (filename) {
+    contentLines.push(`File: ${filename}`);
+  }
+  contentLines.push("");
+  contentLines.push(
+    "Run your resume review worker (for example, `cd resume-review-worker && npm start`) when you're ready to process it."
+  );
+
   try {
-    const { data, error } = await resend.emails.send({
-      from: "MyCareerMate <info@mycareermate.io>",
-      to: [toEmail],
-      subject: "hello world from MyCareerMate",
-      text: "hello world",
-    });
-
-    if (error) {
-      console.error("Error sending email with Resend:", error);
-      return false;
-    }
-
-    return true;
-  } catch (err) {
-    console.error("Exception while sending email with Resend:", err);
-    return false;
+    await DiscordRequest(
+      `channels/${RESUME_REVIEW_ALERT_CHANNEL_ID}/messages`,
+      {
+        method: "POST",
+        body: {
+          content: contentLines.join("\n"),
+        },
+      }
+    );
+  } catch (error) {
+    console.error(
+      "Failed to send resume review alert message:",
+      error
+    );
   }
 }
 
@@ -188,19 +208,10 @@ app.post(
           );
         }
 
-        // Send hello world email
-        const emailSent = await sendHelloWorldEmail(email);
-        if (!emailSent) {
-          return sendEphemeralText(
-            res,
-            "❌ We couldn't send an email to your address. Please try again later."
-          );
-        }
-
-        // Store or update user data
+        // Store or update user data and enqueue a resume review request
         try {
           if (!user) {
-            await prisma.user.create({
+            user = await prisma.user.create({
               data: {
                 discordId,
                 email,
@@ -210,7 +221,7 @@ app.post(
               },
             });
           } else {
-            await prisma.user.update({
+            user = await prisma.user.update({
               where: { id: user.id },
               data: {
                 email,
@@ -224,16 +235,53 @@ app.post(
           console.error("Error saving resume review user data:", error);
           return sendEphemeralText(
             res,
-            "⚠️ Your email was sent, but we couldn't record your resume review status. You may be able to retry later."
+            "⚠️ We couldn't record your resume review status. Please try again later."
           );
         }
 
-        // Process the resume (for now, just respond with info)
-        const filename = attachment.filename;
+        // Enqueue resume review request in the database.
+        // The heavy lifting (downloading, parsing, LLM analysis, and email sending)
+        // is handled asynchronously by a separate background process.
+        try {
+          await prisma.resumeReviewRequest.create({
+            data: {
+              email,
+              discordId,
+              discordUsername: username,
+              attachmentUrl: attachment.url,
+              attachmentFilename: attachment.filename,
+              attachmentContentType: attachment.content_type,
+              attachmentSizeBytes: attachment.size,
+              status: "QUEUED",
+              userId: user?.id || null,
+            },
+          });
+          // Fire-and-forget notification to the alert channel so you
+          // know when to run the background worker manually.
+          notifyNewResumeReviewQueued({
+            discordId,
+            email,
+            filename: attachment.filename,
+          }).catch((error) => {
+            console.error(
+              "Failed to send resume review queued notification:",
+              error
+            );
+          });
+        } catch (error) {
+          console.error(
+            "Error creating resume review request record:",
+            error
+          );
+          return sendEphemeralText(
+            res,
+            "❌ We couldn't queue your resume review request. Please try again later."
+          );
+        }
 
         return sendEphemeralText(
           res,
-          `✅ Resume review request received!\n\n📄 **File:** ${filename}\n📧 **Email:** ${email}\n\n🎉 We've just sent a "hello world" test email to your inbox via MyCareerMate.`
+          `✅ Thanks, your resume review request has been queued!\n\n📄 **File:** ${attachment.filename}\n📧 **Email:** ${email}\n\n🕒 You'll receive a detailed review at this email address once it's ready.`
         );
       }
 
