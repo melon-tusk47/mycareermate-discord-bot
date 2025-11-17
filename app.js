@@ -7,7 +7,7 @@ import {
   MessageComponentTypes,
   verifyKeyMiddleware,
 } from "discord-interactions";
-import { PrismaClient } from "@prisma/client";
+import prismaPkg from "@prisma/client";
 import { DiscordRequest } from "./utils.js";
 
 // Create an express app
@@ -16,6 +16,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Prisma client
+const { PrismaClient } = prismaPkg;
 const prisma = new PrismaClient();
 
 // Allowed channel for resume review command
@@ -67,7 +68,7 @@ async function notifyNewResumeReviewQueued({
   }
   contentLines.push("");
   contentLines.push(
-    "Run your resume review worker (for example, `cd resume-review-worker && npm start`) when you're ready to process it."
+    "Bhai bc resume review worker chalana padega maa ki aankh."
   );
 
   try {
