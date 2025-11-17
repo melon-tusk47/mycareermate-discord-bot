@@ -140,6 +140,30 @@ app.post(
           );
         }
 
+        // Check per-user review limit before doing any heavy validation
+        let user;
+        try {
+          user = await prisma.user.findUnique({
+            where: { discordId },
+          });
+
+          if (
+            user &&
+            user.resumeReviewCount >= MAX_RESUME_REVIEWS_PER_USER
+          ) {
+            return sendEphemeralText(
+              res,
+              "❌ You have already requested a resume review. For now, it's limited to one review per user."
+            );
+          }
+        } catch (error) {
+          console.error("Error checking resume review user data:", error);
+          return sendEphemeralText(
+            res,
+            "❌ Something went wrong while checking your resume review status. Please try again later."
+          );
+        }
+
         const attachmentOption = options?.find(
           (opt) => opt.name === "resume"
         );
@@ -182,30 +206,6 @@ app.post(
           return sendEphemeralText(
             res,
             `❌ Invalid email address: "${email}"\n\nPlease use the command again with a valid email.`
-          );
-        }
-
-        // Check per-user review limit
-        let user;
-        try {
-          user = await prisma.user.findUnique({
-            where: { discordId },
-          });
-
-          if (
-            user &&
-            user.resumeReviewCount >= MAX_RESUME_REVIEWS_PER_USER
-          ) {
-            return sendEphemeralText(
-              res,
-              "❌ You have already requested a resume review. For now, it's limited to one review per user."
-            );
-          }
-        } catch (error) {
-          console.error("Error checking resume review user data:", error);
-          return sendEphemeralText(
-            res,
-            "❌ Something went wrong while checking your resume review status. Please try again later."
           );
         }
 
