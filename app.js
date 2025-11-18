@@ -115,17 +115,6 @@ app.post(
       const { name, options } = data;
 
       if (name === "resume-review") {
-        // Restrict to a specific channel if configured
-        if (
-          RESUME_REVIEW_CHANNEL_ID &&
-          channel_id !== RESUME_REVIEW_CHANNEL_ID
-        ) {
-          return sendEphemeralText(
-            res,
-            "❌ Please use this command in the MyCareerMate Platform #resume-review channel:\nhttps://discord.com/channels/1439456602334691361/1439494111596908575"
-          );
-        }
-
         // Get user info from interaction
         const context = req.body.context;
         const userObj = context === 0 ? req.body.member?.user : req.body.user;
